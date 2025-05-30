@@ -7,6 +7,7 @@ import json
 from datasets import load_dataset, concatenate_datasets, DatasetDict, Dataset
 import pandas as pd
 from eval.math_equivalence import is_equiv
+from vllm.lora.request import LoRARequest
 
 def extract_boxed_answer(text):
     start_token = r"\boxed{"
@@ -30,14 +31,15 @@ def extract_boxed_answer(text):
 def apply_chat_template(example):
     cot_prefix = "Solve the following math problem. Put your final answer within \\boxed{}.\n\n"
     return {
-        "text": f"<｜begin▁of▁sentence｜><｜User｜>{cot_prefix}Question: {example['question']}<｜Assistant｜>{example['model_output_final']}<｜end▁of▁sentence｜>",
+        # "text": f"<｜begin▁of▁sentence｜><｜User｜>{cot_prefix}Question: {example['question']}<｜Assistant｜>{example['model_output_final']}<｜end▁of▁sentence｜>",
         "input_text_only": f"<｜begin▁of▁sentence｜><｜User｜>{cot_prefix}Question: {example['question']}<｜Assistant｜>",
     }
 
 def main(model_dir):
     # 1. Read jsonl
-    df = pd.read_json("MATH_hard_train_proxy_tuning_cleaned.jsonl", lines=True)
-    dev_df = df[df['split'] == 'dev'].reset_index(drop=True)
+    df = pd.read_json("MATH_hard_dev_proxy_tuning.jsonl", lines=True)
+    dev_df = df
+    # dev_df = df[df['split'] == 'dev'].reset_index(drop=True)
 
     # 2. Convert Dataset
     dev_dataset = Dataset.from_pandas(dev_df)
@@ -46,8 +48,18 @@ def main(model_dir):
     # 3. Inference
     input_list = list(dev_dataset["input_text_only"])
     sampling_params = SamplingParams(max_tokens=16384, temperature=0.6, skip_special_tokens=False)
-    llm = LLM(model=model_dir)
-    outputs = llm.generate(input_list, sampling_params)
+    if "checkpoint-0" in model_dir:
+        os.makedirs(model_dir, exist_ok=True)
+        llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    elif args.lora:
+        llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", enable_lora=True, max_lora_rank=64)
+    else:
+        llm = LLM(model=model_dir)
+    if args.lora:
+        outputs = llm.generate(input_list, sampling_params, lora_request=LoRARequest("sql_adapter", 1, model_dir))
+        
+    else:
+        outputs = llm.generate(input_list, sampling_params)
     outputs = [o.outputs[0].text for o in outputs]
     pred_answers = [extract_boxed_answer(p) for p in outputs]
     label_answers = list(dev_dataset["answer"])
@@ -79,5 +91,6 @@ def main(model_dir):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_dir", type=str, help="Path to the model checkpoint directory")
+    parser.add_argument('--lora', action = 'store_true', help = 'Use Huggingface Transformer', default=False)
     args = parser.parse_args()
     main(args.model_dir)
